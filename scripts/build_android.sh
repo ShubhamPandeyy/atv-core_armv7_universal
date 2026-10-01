@@ -41,20 +41,24 @@ BUILD_MODE="${1:-release}"
 KEYSTORE_PATH="${2:-$ROOT_DIR/Corvo_Development.p12}"
 KEYSTORE_PASS="${3:-${MACOS_CERT_P12_PASSWORD:-corvo-developer}}"
 
-TARGET="aarch64-linux-android"
-JNILIBS_DIR="$ROOT_DIR/android-tv/app/src/main/jniLibs/arm64-v8a"
-mkdir -p "$JNILIBS_DIR"
-
 if command -v cargo-ndk &> /dev/null; then
-    echo "Found cargo-ndk, building arm64-v8a release..."
-    cargo ndk -t arm64-v8a -o "$ROOT_DIR/android-tv/app/src/main/jniLibs" build --release -p atv-android
+    echo "Found cargo-ndk, building arm64-v8a + armeabi-v7a release..."
+    cargo ndk -t arm64-v8a -t armeabi-v7a -o "$ROOT_DIR/android-tv/app/src/main/jniLibs" build --release -p atv-android
 else
     echo "cargo-ndk not found. Checking standard cargo build..."
-    cargo build --target "$TARGET" --release -p atv-android
-    cp "$ROOT_DIR/target/$TARGET/release/libatv_android.so" "$JNILIBS_DIR/"
+    for TARGET in aarch64-linux-android armv7-linux-androideabi; do
+        case "$TARGET" in
+            aarch64-linux-android) ABI="arm64-v8a" ;;
+            armv7-linux-androideabi) ABI="armeabi-v7a" ;;
+        esac
+        JNILIBS_DIR="$ROOT_DIR/android-tv/app/src/main/jniLibs/$ABI"
+        mkdir -p "$JNILIBS_DIR"
+        cargo build --target "$TARGET" --release -p atv-android
+        cp "$ROOT_DIR/target/$TARGET/release/libatv_android.so" "$JNILIBS_DIR/"
+    done
 fi
 
-echo "Native library copied to: $JNILIBS_DIR/libatv_android.so"
+echo "Native libraries copied to: $ROOT_DIR/android-tv/app/src/main/jniLibs/"
 
 # Locate and run llvm-strip if present to ensure smallest possible .so
 STRIP_BIN=""
@@ -65,8 +69,11 @@ if [ -z "$STRIP_BIN" ] && [ -n "$ANDROID_NDK_HOME" ] && [ -d "$ANDROID_NDK_HOME"
     STRIP_BIN=$(find "$ANDROID_NDK_HOME" -name "llvm-strip" 2>/dev/null | head -n1 || true)
 fi
 if [ -n "$STRIP_BIN" ] && [ -x "$STRIP_BIN" ]; then
-    echo "Stripping symbols from $JNILIBS_DIR/libatv_android.so..."
-    "$STRIP_BIN" --strip-all "$JNILIBS_DIR/libatv_android.so" || true
+    for SO in "$ROOT_DIR"/android-tv/app/src/main/jniLibs/*/libatv_android.so; do
+        [ -f "$SO" ] || continue
+        echo "Stripping symbols from $SO..."
+        "$STRIP_BIN" --strip-all "$SO" || true
+    done
 fi
 
 echo "=== Building Android TV APK ($BUILD_MODE) ==="
