@@ -1,0 +1,105 @@
+name: Build universal debug-signed APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "android-tv/**"
+      - ".github/workflows/build-universal-apk.yml"
+
+permissions:
+  contents: write   # lets the workflow save the signing key into the repo on first run
+
+env:
+  ABIS: "armeabi-v7a arm64-v8a x86 x86_64"
+  BUILD_TOOLS: "34.0.0"
+  NDK_VERSION: "26.3.11579264"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install build-tools and NDK
+        run: |
+          sdkmanager "build-tools;${BUILD_TOOLS}" "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/build-tools/${BUILD_TOOLS}" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-linux-androideabi,aarch64-linux-android,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build Rust core for all ABIs
+        run: |
+          rm -rf android-tv/app/src/main/jniLibs
+          targets=""
+          for abi in $ABIS; do targets="$targets -t $abi"; done
+          cargo ndk $targets \
+            -o android-tv/app/src/main/jniLibs \
+            build --release -p atv-android
+          find android-tv/app/src/main/jniLibs -name '*.so'
+
+      - name: Remove ABI restrictions in Gradle files
+        working-directory: android-tv
+        run: |
+          grep -rnE "abiFilters|splits|ndk *\{" --include=*.gradle --include=*.kts . || true
+          find . -name 'build.gradle*' -print0 | xargs -0 sed -i -E '/abiFilters/d'
+
+      - name: Build debug APK
+        working-directory: android-tv
+        run: |
+          if [ -x ./gradlew ] || [ -f ./gradlew ]; then chmod +x ./gradlew; ./gradlew --no-daemon assembleDebug
+          else gradle --no-daemon assembleDebug; fi
+
+      # Create the signing key once and keep it in the repo so it never changes.
+      - name: Create signing key if missing
+        run: |
+          if [ ! -f signing/debug.keystore ]; then
+            mkdir -p signing
+            keytool -genkeypair -keystore signing/debug.keystore \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add signing/debug.keystore
+            git commit -m "Add persistent debug signing key"
+            git push
+          fi
+
+      - name: Align and sign
+        run: |
+          APK=$(find android-tv -path '*outputs/apk*' -name '*.apk' | head -n1)
+          echo "Signing: $APK"
+          zipalign -p -f 4 "$APK" aligned.apk
+          apksigner sign \
+            --ks signing/debug.keystore \
+            --ks-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --key-pass pass:android \
+            --out atv-core-universal.apk aligned.apk
+          apksigner verify --verbose atv-core-universal.apk
+
+      - name: Show ABIs inside the APK
+        run: unzip -l atv-core-universal.apk | grep -E 'lib/.*\.so'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atv-core-universal-apk
+          path: atv-core-universal.apk
