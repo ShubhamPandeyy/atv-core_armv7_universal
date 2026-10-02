@@ -28,13 +28,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
+      # The runner already ships the Android SDK, so use its sdkmanager directly.
       - name: Install build-tools and NDK
         run: |
-          sdkmanager "build-tools;${BUILD_TOOLS}" "ndk;${NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "$ANDROID_HOME/build-tools/${BUILD_TOOLS}" >> "$GITHUB_PATH"
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager | tail -n1)
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK" "build-tools;${BUILD_TOOLS}" "ndk;${NDK_VERSION}" "platforms;android-34"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "$SDK/build-tools/${BUILD_TOOLS}" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
